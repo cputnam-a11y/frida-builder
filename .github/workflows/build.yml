@@ -1,6 +1,11 @@
 name: Build frida-gum (shared library)
 
 on:
+  push:
+    branches: [main]
+    tags: ['**']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       gum_ref:
@@ -25,10 +30,37 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------
+  # Resolve gum_ref (branch/tag/SHA) to one exact commit up front, so every
+  # platform job builds from the identical commit even if a branch moves
+  # mid-run, and so we have a stable hash for filenames/release naming.
+  # ---------------------------------------------------------------------
+  resolve-ref:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      short_sha: ${{ steps.resolve.outputs.short_sha }}
+    steps:
+      - name: Check out frida-gum at requested ref
+        uses: actions/checkout@v6
+        with:
+          repository: frida/frida-gum
+          ref: ${{ env.GUM_REF }}
+          fetch-depth: 1
+
+      - name: Resolve commit SHA
+        id: resolve
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "Resolved ${{ env.GUM_REF }} -> $SHA"
+
+  # ---------------------------------------------------------------------
   # Desktop platforms, built natively (or via Rosetta/multilib where the
   # runner's own arch differs from the target).
   # ---------------------------------------------------------------------
   native:
+    needs: resolve-ref
     strategy:
       matrix:
         include:
@@ -46,7 +78,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: frida/frida-gum
-          ref: ${{ env.GUM_REF }}
+          ref: ${{ needs.resolve-ref.outputs.sha }}
           submodules: recursive
 
       - name: Install gcc-multilib
@@ -103,8 +135,16 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          find build -type f \( -name '*.so' -o -name '*.so.*' -o -name '*.dylib' -o -name '*.dll' -o -name '*.lib' \) \
-            -exec cp -v {} dist/ \;
+          # Exact names only: the build also produces frida-gum-heap-1.0.*
+          # and frida-gum-prof-1.0.* (optional profiling/heap-tracking
+          # helper libs) plus *.so.symbols sidecar files. A broad glob here
+          # pulls those in too, and since the release job collapses each
+          # artifact to one file per extension, they'd silently overwrite
+          # the real core library.
+          find build -type f \( \
+              -name 'frida-gum-1.0.dll' -o -name 'frida-gum-1.0.lib' \
+              -o -name 'libfrida-gum-1.0.so' -o -name 'libfrida-gum-1.0.dylib' \
+            \) -exec cp -v {} dist/ \;
           ls -la dist
 
       - name: Upload artifact
@@ -119,6 +159,7 @@ jobs:
   # using frida's own prebuilt toolchain containers.
   # ---------------------------------------------------------------------
   manylinux:
+    needs: resolve-ref
     strategy:
       matrix:
         arch: [x86, x86_64, x86_64-musl, armhf, arm64, arm64-musl, mips, mipsel, mips64, mips64el]
@@ -130,7 +171,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: frida/frida-gum
-          ref: ${{ env.GUM_REF }}
+          ref: ${{ needs.resolve-ref.outputs.sha }}
           submodules: recursive
 
       - name: Build
@@ -142,7 +183,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          find build -type f \( -name '*.so' -o -name '*.so.*' \) -exec cp -v {} dist/ \;
+          find build -type f -name 'libfrida-gum-1.0.so' -exec cp -v {} dist/ \;
           ls -la dist
 
       - name: Upload artifact
@@ -156,6 +197,7 @@ jobs:
   # Mobile: iOS and Android.
   # ---------------------------------------------------------------------
   mobile:
+    needs: resolve-ref
     strategy:
       matrix:
         id: [ios-arm64, android-x86, android-x86_64, android-arm, android-arm64]
@@ -166,7 +208,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: frida/frida-gum
-          ref: ${{ env.GUM_REF }}
+          ref: ${{ needs.resolve-ref.outputs.sha }}
           submodules: recursive
 
       - uses: nttld/setup-ndk@v1
@@ -189,7 +231,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          find build -type f \( -name '*.so' -o -name '*.so.*' -o -name '*.dylib' \) -exec cp -v {} dist/ \;
+          find build -type f \( -name 'libfrida-gum-1.0.so' -o -name 'libfrida-gum-1.0.dylib' \) -exec cp -v {} dist/ \;
           ls -la dist
 
       - name: Upload artifact
@@ -205,7 +247,7 @@ jobs:
   # never publish anything.
   # ---------------------------------------------------------------------
   release:
-    needs: [native, manylinux, mobile]
+    needs: [resolve-ref, native, manylinux, mobile]
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true' }}
     runs-on: ubuntu-latest
     permissions:
@@ -220,11 +262,13 @@ jobs:
       - name: Compute release version
         id: version
         run: |
-          # Artifact names are already "frida-gum-<os>-<arch>", so the
-          # version is just the frida-gum ref, sanitized for use in
-          # filenames and as a git tag (no slashes/spaces).
-          VERSION=$(echo "${{ env.GUM_REF }}" | tr '/ ' '--')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Artifact names are already "frida-gum-<os>-<arch>". The version
+          # combines the requested ref (sanitized for filenames/tags) with
+          # the exact commit it resolved to, so a moving branch name like
+          # "main" still identifies precisely what was built.
+          REF_PART=$(echo "${{ env.GUM_REF }}" | tr '/ ' '--')
+          SHORT_SHA="${{ needs.resolve-ref.outputs.short_sha }}"
+          echo "version=${REF_PART}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Rename binaries for release
         run: |
