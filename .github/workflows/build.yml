@@ -1,9 +1,6 @@
 name: Build frida-gum (shared library)
 
 on:
-  push:
-    branches: [main]
-    tags: ['**']
   workflow_dispatch:
     inputs:
       gum_ref:
@@ -239,12 +236,21 @@ jobs:
             os_arch=${artifact_name#frida-gum-}
             for f in "$dir"*; do
               [ -f "$f" ] || continue
+              size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")
+              if [ "$size" -eq 0 ]; then
+                echo "::warning::Skipping empty file from artifact '$artifact_name': $f"
+                continue
+              fi
               ext="${f##*.}"
               cp -v "$f" "release/frida-gum-${VERSION}-${os_arch}.${ext}"
             done
           done
           echo "Release files:"
           ls -la release
+          if [ -z "$(ls -A release)" ]; then
+            echo "::error::No non-empty files were found across any artifact; nothing to release."
+            exit 1
+          fi
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3
