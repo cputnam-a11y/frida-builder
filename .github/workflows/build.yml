@@ -56,7 +56,11 @@ jobs:
         if: startsWith(matrix.id, 'windows-')
         run: |
           .\configure ${{ env.GUM_OPTIONS }}
-          .\make
+          # Build only the core frida-gum shared library. The optional
+          # gum-heap/gum-prof helper DLLs fail to link with --enable-shared
+          # on Windows (upstream export-annotation gap in frida-gum) and
+          # aren't needed for a plain frida-gum.dll.
+          .\make gum/frida-gum-1.0.dll
 
       - name: Build (native)
         if: ${{ !startsWith(matrix.id, 'windows-') && matrix.id != 'linux-x86' && matrix.id != 'macos-x86_64' }}
