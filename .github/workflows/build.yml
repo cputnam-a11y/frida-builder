@@ -1,0 +1,176 @@
+name: Build frida-gum (shared library)
+
+on:
+  push:
+    branches: [main]
+    tags: ['**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  # --enable-shared switches gum's default_library to "shared", so you get
+  # libfrida-gum-1.0.so / .dylib / frida-gum-1.0.dll instead of the static
+  # lib that's normally combined into the "devkit".
+  GUM_OPTIONS: '--enable-shared --disable-tests'
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Desktop platforms, built natively (or via Rosetta/multilib where the
+  # runner's own arch differs from the target).
+  # ---------------------------------------------------------------------
+  native:
+    strategy:
+      matrix:
+        include:
+          - { id: windows-x86_64, runner: windows-latest }
+          - { id: windows-x86,    runner: windows-latest }
+          - { id: windows-arm64,  runner: windows-11-arm }
+          - { id: macos-x86_64,   runner: macos-latest }
+          - { id: macos-arm64,    runner: macos-latest }
+          - { id: linux-x86_64,   runner: ubuntu-latest }
+          - { id: linux-x86,      runner: ubuntu-latest }
+      fail-fast: false
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v6
+        with:
+          repository: frida/frida-gum
+          submodules: recursive
+
+      - name: Install gcc-multilib
+        if: matrix.id == 'linux-x86'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib lib32stdc++-13-dev
+
+      - name: Install Rosetta
+        if: matrix.id == 'macos-x86_64'
+        run: |
+          softwareupdate --install-rosetta --agree-to-license
+          echo 'int main (void) { return 0; }' > /tmp/warmup.c
+          arch -x86_64 clang -arch x86_64 -dynamiclib /tmp/warmup.c -o /tmp/warmup.dylib
+
+      - name: Build (Windows)
+        if: startsWith(matrix.id, 'windows-')
+        run: |
+          .\configure ${{ env.GUM_OPTIONS }}
+          .\make
+
+      - name: Build (native)
+        if: ${{ !startsWith(matrix.id, 'windows-') && matrix.id != 'linux-x86' && matrix.id != 'macos-x86_64' }}
+        run: |
+          ./configure ${{ env.GUM_OPTIONS }}
+          make
+
+      - name: Build (macOS x86_64 via Rosetta cross-build)
+        if: matrix.id == 'macos-x86_64'
+        run: |
+          ./configure --host=macos-x86_64 ${{ env.GUM_OPTIONS }}
+          make
+
+      - name: Build (Linux x86 via multilib)
+        if: matrix.id == 'linux-x86'
+        run: |
+          CC="gcc -m32" CXX="g++ -m32" STRIP="strip" \
+            ./configure --build=linux-x86 --host=linux-x86 ${{ env.GUM_OPTIONS }}
+          make
+
+      - name: Collect shared library
+        shell: bash
+        run: |
+          mkdir -p dist
+          find build -type f \( -name '*.so' -o -name '*.so.*' -o -name '*.dylib' -o -name '*.dll' -o -name '*.lib' \) \
+            -exec cp -v {} dist/ \;
+          ls -la dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: frida-gum-${{ matrix.id }}
+          path: dist/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Everything else on Linux (musl, arm/arm64, mips family) is cross-built
+  # using frida's own prebuilt toolchain containers.
+  # ---------------------------------------------------------------------
+  manylinux:
+    strategy:
+      matrix:
+        arch: [x86, x86_64, x86_64-musl, armhf, arm64, arm64-musl, mips, mipsel, mips64, mips64el]
+      fail-fast: false
+    runs-on: ubuntu-latest
+    container: ghcr.io/frida/x-tools-linux-${{ matrix.arch }}:latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v6
+        with:
+          repository: frida/frida-gum
+          submodules: recursive
+
+      - name: Build
+        run: |
+          ./configure --host=$XTOOLS_HOST ${{ env.GUM_OPTIONS }}
+          make
+
+      - name: Collect shared library
+        shell: bash
+        run: |
+          mkdir -p dist
+          find build -type f \( -name '*.so' -o -name '*.so.*' \) -exec cp -v {} dist/ \;
+          ls -la dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: frida-gum-linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Mobile: iOS and Android.
+  # ---------------------------------------------------------------------
+  mobile:
+    strategy:
+      matrix:
+        id: [ios-arm64, android-x86, android-x86_64, android-arm, android-arm64]
+      fail-fast: false
+    runs-on: ${{ startsWith(matrix.id, 'ios-') && 'macos-latest' || 'ubuntu-latest' }}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v6
+        with:
+          repository: frida/frida-gum
+          submodules: recursive
+
+      - uses: nttld/setup-ndk@v1
+        if: startsWith(matrix.id, 'android-')
+        id: setup-ndk
+        with:
+          ndk-version: r29
+          add-to-path: false
+
+      - name: Set ANDROID_NDK_ROOT
+        if: startsWith(matrix.id, 'android-')
+        run: echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
+
+      - name: Build
+        run: |
+          ./configure --host=${{ matrix.id }} ${{ env.GUM_OPTIONS }}
+          make
+
+      - name: Collect shared library
+        shell: bash
+        run: |
+          mkdir -p dist
+          find build -type f \( -name '*.so' -o -name '*.so.*' -o -name '*.dylib' \) -exec cp -v {} dist/ \;
+          ls -la dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: frida-gum-${{ matrix.id }}
+          path: dist/
+          if-no-files-found: error
