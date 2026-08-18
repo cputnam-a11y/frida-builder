@@ -56,7 +56,7 @@ jobs:
         if: startsWith(matrix.id, 'windows-')
         run: |
           .\configure ${{ env.GUM_OPTIONS }}
-          .\make
+          .\make gum/frida-gum-1.0.dll
 
       - name: Build (native)
         if: ${{ !startsWith(matrix.id, 'windows-') && matrix.id != 'linux-x86' && matrix.id != 'macos-x86_64' }}
